@@ -1,0 +1,26 @@
+version: "3.8"
+
+services:
+  wg-tor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: wg-tor
+    restart: unless-stopped
+    environment:
+      - WG_HOST=auto          # set to your public IP/FQDN or keep 'auto' to detect
+      - WG_PORT=51820         # WireGuard UDP port
+      - SOCKS_PORT=9050       # Tor SOCKS5 port
+      - DEBUG=false           # set true to temporarily enable verbose logs
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      net.ipv4.conf.all.src_valid_mark: "1"
+    volumes:
+      - ./data:/data
+    ports:
+      - "51820:51820/udp"
+    logging:
+      driver: "none"
