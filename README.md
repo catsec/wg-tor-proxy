@@ -68,3 +68,7 @@ services:
       - DEBUG=false
     restart: unless-stopped
 ```
+
+## Sanity fixes included
+- Corrected client `Endpoint` when `WG_HOST=auto` by passing the detected IP to the generator.
+- Adjusted `DNSPort` bind to `0.0.0.0:5353` to work with iptables REDIRECT from wg0.
