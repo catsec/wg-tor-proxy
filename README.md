@@ -44,15 +44,15 @@ This repo includes `.github/workflows/build.yml` to build **linux/amd64 + linux/
 No extra secrets are needed: the default `GITHUB_TOKEN` has `packages: write` permission.
 To pull on Synology:
 ```bash
-docker login ghcr.io -u <your-github-username> -p <a classic PAT or token>
-docker pull ghcr.io/<your-github-username>/<your-repo>:latest
+docker login ghcr.io -u catsec -p <a classic PAT or token>
+docker pull ghcr.io/catsec/wg-tor-proxy:latest
 ```
 
 **Compose example using the published image:**
 ```yaml
 services:
   wg-tor:
-    image: ghcr.io/<your-github-username>/<your-repo>:latest
+    image: ghcr.io/catsec/wg-tor-proxy:latest
     devices:
       - /dev/net/tun:/dev/net/tun
     cap_add:
