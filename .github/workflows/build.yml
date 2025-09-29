@@ -9,6 +9,9 @@ permissions:
   contents: read
   packages: write
 
+env:
+  IMAGE_NAME: ghcr.io/catsec/wg-tor-proxy
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -29,16 +32,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Derive image name
+      - name: Compute tags
         id: meta
         run: |
-          REPO_LC="${GITHUB_REPOSITORY,,}"
-          echo "IMAGE=ghcr.io/${REPO_LC}:latest" >> $GITHUB_OUTPUT
+          echo "LATEST=${{ env.IMAGE_NAME }}:latest" >> $GITHUB_OUTPUT
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            echo "IMAGE_TAGGED=ghcr.io/${REPO_LC}:${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+            echo "EXTRA=${{ env.IMAGE_NAME }}:${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
           else
-            SHORT_SHA="${GITHUB_SHA::7}"
-            echo "IMAGE_TAGGED=ghcr.io/${REPO_LC}:${SHORT_SHA}" >> $GITHUB_OUTPUT
+            echo "EXTRA=${{ env.IMAGE_NAME }}:${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
           fi
 
       - name: Build & push (multi-arch)
@@ -48,8 +49,8 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ${{ steps.meta.outputs.IMAGE }}
-            ${{ steps.meta.outputs.IMAGE_TAGGED }}
+            ${{ steps.meta.outputs.LATEST }}
+            ${{ steps.meta.outputs.EXTRA }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false
