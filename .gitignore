@@ -1,0 +1,5 @@
+data/
+*.key
+*.conf
+.DS_Store
+__MACOSX/

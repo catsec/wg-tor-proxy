@@ -1,138 +1,180 @@
 #!/bin/bash
-set -euo pipefail
+set -e
 
-# Colors (silence when DEBUG=false)
-GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
-DEBUG="${DEBUG:-false}"
-if [ "$DEBUG" = "true" ]; then
-  log_info(){ echo -e "${GREEN}[INFO]${NC} $*"; }
-  log_warn(){ echo -e "${YELLOW}[WARN]${NC} $*"; }
-  log_error(){ echo -e "${RED}[ERROR]${NC} $*"; }
-else
-  log_info(){ :; }; log_warn(){ :; }; log_error(){ :; }
-fi
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
 
-WG_INTERFACE="${WG_INTERFACE:-wg0}"
-WG_SUBNET="${WG_SUBNET:-10.13.13.0/24}"
-WG_ADDR="${WG_ADDR:-10.13.13.1/24}"
-WG_HOST="${WG_HOST:-auto}"
+log_info() {
+    echo -e "${GREEN}[INFO]${NC} $1"
+}
+
+log_warn() {
+    echo -e "${YELLOW}[WARN]${NC} $1"
+}
+
+log_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+WG_INTERFACE="wg0"
+WG_SUBNET="10.13.13.0/24"
 WG_PORT="${WG_PORT:-51820}"
 SOCKS_PORT="${SOCKS_PORT:-9050}"
 
-mkdir -p /data /etc/wireguard /data/tor
-chmod 700 /data
-
-# Detect public endpoint if WG_HOST=auto
-detect_public() {
-  (curl -fsS https://ifconfig.me || curl -fsS https://api.ipify.org) 2>/dev/null || true
-}
+log_info "Starting Tor + WireGuard Privacy Proxy..."
 
 if [ "$WG_HOST" = "auto" ]; then
-  IP=$(detect_public || true)
-  if [ -n "${IP:-}" ]; then
-    WG_ENDPOINT="$IP:$WG_PORT"
-  else
-    log_warn "Could not auto-detect public IP; WG endpoint will be ':$WG_PORT' until reachable."
-    WG_ENDPOINT=":$WG_PORT"
-  fi
-else
-  WG_ENDPOINT="$WG_HOST:$WG_PORT"
+    log_info "Detecting public IP address..."
+    WG_HOST=$(curl -s https://api.ipify.org || curl -s https://ifconfig.me || echo "localhost")
+    log_info "Detected public IP: $WG_HOST"
 fi
-log_info "WG endpoint: ${WG_ENDPOINT}"
 
-# Keys
+mkdir -p /data
+
 if [ ! -f /data/server_private.key ]; then
-  log_info "Generating WireGuard server keys..."
-  umask 077
-  wg genkey | tee /data/server_private.key | wg pubkey > /data/server_public.key
+    log_info "Generating WireGuard server keys..."
+    wg genkey | tee /data/server_private.key | wg pubkey > /data/server_public.key
+    chmod 600 /data/server_private.key
+    log_info "Server keys generated"
 fi
+
 if [ ! -f /data/client_private.key ]; then
-  log_info "Generating WireGuard client keys..."
-  umask 077
-  wg genkey | tee /data/client_private.key | wg pubkey > /data/client_public.key
+    log_info "Generating WireGuard client keys..."
+    wg genkey | tee /data/client_private.key | wg pubkey > /data/client_public.key
+    chmod 600 /data/client_private.key
+    log_info "Client keys generated"
+fi
+
+if [ ! -f /data/torrc ]; then
+    log_info "Creating Tor configuration..."
+    cp /usr/share/tor/torrc.sample /data/torrc || cat > /data/torrc <<TOREOF
+SocksPort 0.0.0.0:9050
+CookieAuthentication 1
+AvoidDiskWrites 1
+Log notice file /dev/null
+DataDirectory /var/lib/tor
+ExitRelay 0
+TOREOF
+    log_info "Tor configuration created"
 fi
 
 SERVER_PRIVATE_KEY=$(cat /data/server_private.key)
 SERVER_PUBLIC_KEY=$(cat /data/server_public.key)
+CLIENT_PRIVATE_KEY=$(cat /data/client_private.key)
 CLIENT_PUBLIC_KEY=$(cat /data/client_public.key)
 
-# Server config
-cat >/etc/wireguard/${WG_INTERFACE}.conf <<EOF
+log_info "Creating WireGuard server configuration..."
+cat > /etc/wireguard/${WG_INTERFACE}.conf <<WGEOF
 [Interface]
 PrivateKey = ${SERVER_PRIVATE_KEY}
-Address = ${WG_ADDR}
+Address = 10.13.13.1/24
 ListenPort = ${WG_PORT}
-# We deliberately do NOT set PostUp/PostDown here; firewall set below.
+PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT
+PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT
 
 [Peer]
-# single allowed client; add more peers as needed
 PublicKey = ${CLIENT_PUBLIC_KEY}
 AllowedIPs = 10.13.13.2/32
 PersistentKeepalive = 25
-EOF
+WGEOF
 
-# Bring up WG
-log_info "Bringing up ${WG_INTERFACE}..."
-wg-quick up ${WG_INTERFACE} || (log_error "Failed to bring up ${WG_INTERFACE}"; ip a; exit 1)
+chmod 600 /etc/wireguard/${WG_INTERFACE}.conf
 
-# Tor config: SOCKS + DNSPort with no logs by default
-if [ ! -f /data/torrc ]; then
-  cat >/data/torrc <<'TORRC'
-SocksPort 0.0.0.0:9050
-DNSPort 127.0.0.1:5353
-AvoidDiskWrites 1
-Log notice file /dev/null
-DataDirectory /data/tor
-ExitRelay 0
-TORRC
-fi
-# If DEBUG=true, switch Tor logs to stdout (optional)
-if [ "$DEBUG" = "true" ]; then
-  sed -i 's|^Log .*|Log notice stdout|' /data/torrc || true
-fi
+log_info "Generating WireGuard client configuration..."
+/usr/local/bin/generate-wireguard-config.sh \
+    "$CLIENT_PRIVATE_KEY" \
+    "$SERVER_PUBLIC_KEY" \
+    "$WG_HOST" \
+    "$WG_PORT" \
+    "$SOCKS_PORT"
 
-# Firewall: reset and lock down
-# Accept only what we need; block everything else
-log_info "Configuring iptables..."
-iptables -F || true
-iptables -t nat -F || true
-iptables -X || true
-iptables -t nat -X || true
+log_info "Starting WireGuard interface..."
+wg-quick up ${WG_INTERFACE}
 
-# Base policies
+log_info "Configuring firewall rules..."
+
+iptables -F
+iptables -X
+iptables -t nat -F
+iptables -t nat -X
+
 iptables -P INPUT DROP
 iptables -P FORWARD DROP
 iptables -P OUTPUT ACCEPT
 
-# Accept loopback and established
 iptables -A INPUT -i lo -j ACCEPT
-iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+iptables -A OUTPUT -o lo -j ACCEPT
 
-# Allow WireGuard UDP port on INPUT
+iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+iptables -A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
 iptables -A INPUT -p udp --dport ${WG_PORT} -j ACCEPT
 
-# Allow SOCKS5 on INPUT from WG subnet only
 iptables -A INPUT -s ${WG_SUBNET} -p tcp --dport ${SOCKS_PORT} -j ACCEPT
+iptables -A FORWARD -s ${WG_SUBNET} -p tcp --dport ${SOCKS_PORT} -j ACCEPT
 
-# Redirect DNS (53) from wg0 to Tor DNSPort 5353 (both UDP and TCP)
-iptables -t nat -A PREROUTING -i ${WG_INTERFACE} -p udp --dport 53 -j REDIRECT --to-ports 5353
-iptables -t nat -A PREROUTING -i ${WG_INTERFACE} -p tcp --dport 53 -j REDIRECT --to-ports 5353
+iptables -A FORWARD -i ${WG_INTERFACE} -j DROP
 
-# (No FORWARD exceptions for SOCKS; traffic terminates locally.)
+log_info "Firewall configured - Only SOCKS5 port accessible via WireGuard"
 
-# Generate client config + QR
-/usr/local/bin/generate-wireguard-config.sh "$(cat /data/client_private.key)" "${SERVER_PUBLIC_KEY}" "${WG_HOST}" "${WG_PORT}" "${SOCKS_PORT}" || true
+log_info "Starting Tor daemon..."
+chown -R toruser:toruser /var/lib/tor
+su -s /bin/sh toruser -c "tor -f /data/torrc" &
+TOR_PID=$!
 
-# Launch Tor and keep container alive
-log_info "Starting Tor..."
-tor -f /data/torrc &
+log_info "Waiting for Tor to establish circuits..."
+sleep 15
 
-# If debug, show some status
-if [ "$DEBUG" = "true" ]; then
-  wg show
-  ss -lntup || true
+if kill -0 $TOR_PID 2>/dev/null; then
+    log_info "${GREEN}[OK]${NC} Tor is running (PID: $TOR_PID)"
+else
+    log_error "Tor failed to start"
+    exit 1
 fi
 
-# Stay running
-trap 'log_info "Shutting down..."; wg-quick down ${WG_INTERFACE} || true; exit 0' SIGINT SIGTERM
-while true; do sleep 3600; done
+if curl -x socks5h://127.0.0.1:${SOCKS_PORT} -s https://check.torproject.org/ | grep -q Congratulations; then
+    log_info "${GREEN}[OK]${NC} Tor connection verified"
+else
+    log_warn "Tor connection test inconclusive (may take longer to establish circuits)"
+fi
+
+log_info "============================================"
+log_info "${GREEN}System Ready!${NC}"
+log_info "============================================"
+log_info "WireGuard config: /data/molly-tor.conf"
+log_info "SOCKS5 Proxy: 10.13.13.1:${SOCKS_PORT}"
+log_info "WireGuard Port: ${WG_PORT}/udp"
+log_info "============================================"
+
+cleanup() {
+    log_info "Shutting down..."
+
+    # Stop Tor daemon gracefully
+    if [ ! -z "$TOR_PID" ]; then
+        kill -TERM $TOR_PID 2>/dev/null || true
+        sleep 5
+        kill -KILL $TOR_PID 2>/dev/null || true
+        wait $TOR_PID 2>/dev/null || true
+    fi
+
+    # Clean up WireGuard interface
+    wg-quick down ${WG_INTERFACE} 2>/dev/null || true
+
+    log_info "Shutdown complete"
+    exit 0
+}
+
+trap cleanup SIGTERM SIGINT
+
+while true; do
+    # Check Tor process
+    if ! kill -0 $TOR_PID 2>/dev/null; then
+        log_error "Tor process died, restarting..."
+        su -s /bin/sh toruser -c "tor -f /data/torrc" &
+        TOR_PID=$!
+    fi
+
+    sleep 30
+done

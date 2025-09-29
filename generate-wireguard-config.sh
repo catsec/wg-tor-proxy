@@ -1,5 +1,5 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/bash
+set -e
 
 CLIENT_PRIVATE_KEY="$1"
 SERVER_PUBLIC_KEY="$2"
@@ -7,57 +7,73 @@ WG_HOST="$3"
 WG_PORT="$4"
 SOCKS_PORT="$5"
 
-# Client uses only the server's tunnel IP (split tunnel)
-# DNS is the server tunnel IP; container transparently forwards to Tor DNSPort.
+# Generate the WireGuard config content
 WG_CONFIG="[Interface]
 PrivateKey = ${CLIENT_PRIVATE_KEY}
 Address = 10.13.13.2/32
-DNS = 10.13.13.1
+DNS = ${WG_DEFAULT_DNS:-1.1.1.1,1.0.0.1}
 
 [Peer]
 PublicKey = ${SERVER_PUBLIC_KEY}
-AllowedIPs = 10.13.13.1/32
 Endpoint = ${WG_HOST}:${WG_PORT}
-PersistentKeepalive = 25
-"
+AllowedIPs = 10.13.13.1/32
+PersistentKeepalive = 25"
 
-mkdir -p /data
-echo "$WG_CONFIG" > /data/molly-tor.conf
-chmod 0644 /data/molly-tor.conf
+# Generate the full config file with instructions
+cat > /data/molly-tor.conf <<CONFEOF
+# Molly.im -> WireGuard -> SOCKS5 -> Tor Configuration
+# Generated: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+#
+# SOCKS5 Proxy Settings for Molly.im:
+# - Host: 10.13.13.1
+# - Port: ${SOCKS_PORT}
+# - Type: SOCKS5 (no authentication)
 
-# Create a help text for Molly users
-cat > /data/molly-tor.txt <<'EOH'
-Molly (Signal) over WireGuard → Tor
-===================================
-1) Import / scan the QR of /data/molly-tor.conf into WireGuard mobile.
-2) Connect the WireGuard tunnel.
-3) In Molly: Settings → Advanced → Proxy → SOCKS5
-   Host: 10.13.13.1     Port: 9050
-4) All Molly traffic (including DNS) will route through Tor.
-EOH
-chmod 0644 /data/molly-tor.txt
+${WG_CONFIG}
 
-# Try to produce an ASCII QR. Prefer python3+qrcode, fallback to qrencode, else skip.
-QR_OUT="/data/molly-tor.qr.txt"
-if command -v python3 >/dev/null 2>&1; then
-  python3 - <<'PY' || true
-try:
-    import qrcode
-    img = qrcode.make(open('/data/molly-tor.conf','r').read())
-    # Render a coarse ASCII approximation
-    import numpy as np
-    m = np.array(img, dtype=bool)
-    with open('/data/molly-tor.qr.txt','w') as f:
-        for row in m:
-            f.write(''.join('██' if v else '  ' for v in row) + '\n')
-except Exception as e:
-    pass
-PY
-elif command -v qrencode >/dev/null 2>&1; then
-  qrencode -t ASCIIi -o "$QR_OUT" < /data/molly-tor.conf || true
-fi
-chmod 0644 "$QR_OUT" || true
+# ============================================
+# INSTRUCTIONS FOR MOLLY.IM
+# ============================================
+# 1. Import this config into your WireGuard app
+# 2. Connect to the VPN
+# 3. In Molly.im settings:
+#    - Go to Settings > Advanced > Proxy
+#    - Enable proxy
+#    - Type: SOCKS5
+#    - Host: 10.13.13.1
+#    - Port: ${SOCKS_PORT}
+# 4. Verify connection in Molly.im
+# ============================================
+CONFEOF
+
+# Generate ASCII QR code for easy mobile import
+echo "Generating ASCII QR code for mobile import..."
+python3 -c "
+import qrcode
+
+config = '''${WG_CONFIG}'''
+
+qr = qrcode.QRCode(border=1)
+qr.add_data(config)
+qr.make()
+qr.print_ascii()
+" > /data/molly-tor.qr.txt 2>/dev/null || echo "QR code generation failed" > /data/molly-tor.qr.txt
+
+# Add QR code instructions to the main config file
+cat >> /data/molly-tor.conf <<QREOF
+
+# ============================================
+# QR CODE FOR MOBILE IMPORT
+# ============================================
+# View the ASCII QR code with: cat molly-tor.qr.txt
+# Or scan this QR code with your WireGuard mobile app
+# for instant configuration import.
+# ============================================
+QREOF
+
+chmod 644 /data/molly-tor.conf
+chmod 644 /data/molly-tor.qr.txt
 
 echo "WireGuard client configuration generated:"
-echo "  - /data/molly-tor.conf"
-[ -s "$QR_OUT" ] && echo "  - /data/molly-tor.qr.txt (ASCII QR)"
+echo "  Config file: /data/molly-tor.conf"
+echo "  ASCII QR code: /data/molly-tor.qr.txt"
